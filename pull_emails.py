@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
+from email_to_pdf import create_email_pdf
 from email_processing import process_email
 from email_store import EmailStore
 from graph_client import GraphClient
@@ -17,6 +18,7 @@ CONFIG_PATH = ROOT / "config.json"
 DATA_ROOT = ROOT / "data"
 DATABASE_PATH = DATA_ROOT / "emails.sqlite3"
 ATTACHMENT_ROOT = DATA_ROOT / "attachments"
+PDF_ROOT = DATA_ROOT / "pdfs"
 CACHE_PATH = ROOT / "token_cache.bin"
 ALLOWED_FLAG_STATUSES = ("flagged", "notFlagged", "complete")
 
@@ -25,13 +27,25 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Download notFlagged Microsoft Graph emails and attachments, "
-            "store them locally, process them, and update their flag."
+            "store them locally, process them, and update their flag. "
+            "Convert selected stored emails to PDF with --convert-to-pdf."
         )
     )
     parser.add_argument(
         "--list",
         action="store_true",
-        help="List the five most recent emails instead of syncing",
+        help="List the five most recent Exchange emails",
+    )
+    parser.add_argument(
+        "--list-stored",
+        action="store_true",
+        help="List recently synced emails available for PDF conversion",
+    )
+    parser.add_argument(
+        "--convert-to-pdf",
+        nargs="+",
+        metavar="GRAPH_MESSAGE_ID",
+        help="Convert one or more stored emails and append their attachments",
     )
     parser.add_argument(
         "--message-id",
@@ -46,8 +60,20 @@ def parse_args():
 
     if bool(args.message_id) != bool(args.flag_status):
         parser.error("--message-id and --flag-status must be provided together")
-    if args.list and args.message_id:
-        parser.error("--list cannot be combined with --message-id")
+    selected_modes = sum(
+        bool(value)
+        for value in (
+            args.list,
+            args.list_stored,
+            args.convert_to_pdf,
+            args.message_id,
+        )
+    )
+    if selected_modes > 1:
+        parser.error(
+            "--list, --list-stored, --convert-to-pdf, and --message-id "
+            "are mutually exclusive"
+        )
     return args
 
 
@@ -112,9 +138,13 @@ def _attachment_target(message_id, attachment_id, name):
     return ATTACHMENT_ROOT / message_folder / f"{attachment_prefix}_{_safe_filename(name)}"
 
 
-def _download_attachment(graph, store, message_id, attachment, attachment_type):
+def _download_attachment(
+    graph, store, message_id, attachment, attachment_type, attachment_index
+):
     attachment_id = attachment["id"]
-    store.upsert_attachment(message_id, attachment, attachment_type)
+    store.upsert_attachment(
+        message_id, attachment, attachment_type, attachment_index
+    )
 
     downloadable = attachment_type in ("fileAttachment", "itemAttachment")
     if not downloadable:
@@ -175,17 +205,24 @@ def sync_emails(graph, store):
             store.upsert_email(message)
             # Query explicitly because Graph's hasAttachments flag can omit
             # inline attachments.
-            for attachment in graph.list_attachments(message_id):
+            for attachment_index, attachment in enumerate(
+                graph.list_attachments(message_id)
+            ):
                 raw_type = attachment.get("@odata.type", "")
                 attachment_type = raw_type.rsplit(".", 1)[-1].lstrip("#")
                 if not attachment_type:
                     attachment_type = "fileAttachment"
                 _download_attachment(
-                    graph, store, message_id, attachment, attachment_type
+                    graph,
+                    store,
+                    message_id,
+                    attachment,
+                    attachment_type,
+                    attachment_index,
                 )
 
-            stage = "processing_failed"
             email = store.get_email(message_id)
+            stage = "processing_failed"
             flag_status = process_email(email)
             if flag_status not in ALLOWED_FLAG_STATUSES or flag_status == "notFlagged":
                 raise ValueError(
@@ -225,8 +262,59 @@ def list_recent_emails(graph):
         )
 
 
+def list_stored_emails(store, limit=20):
+    emails = store.list_recent_emails(limit)
+    print(f"\nLatest {len(emails)} stored emails:\n")
+    for email in emails:
+        sender = (email.get("sender") or {}).get("emailAddress") or {}
+        subject = email.get("subject") or "(No Subject)"
+        received = email.get("received_datetime") or ""
+        pdf_path = email.get("pdf_path")
+        pdf_status = "PDF available" if pdf_path and Path(pdf_path).is_file() else "no PDF"
+        print(f"- ID: {email['graph_id']}")
+        print(
+            f"  [{received[:10]}] From: {sender.get('name') or sender.get('address', 'Unknown Sender')} "
+            f"| Subject: {subject} | {pdf_status}"
+        )
+
+
+def convert_email_to_pdf(store, message_id):
+    email = store.get_email(message_id)
+    if email is None:
+        raise ValueError(
+            f"Email {message_id!r} is not stored locally; run a sync first"
+        )
+    output_path = PDF_ROOT / (
+        hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:24] + ".pdf"
+    )
+    create_email_pdf(email, output_path)
+    store.set_pdf_path(message_id, output_path)
+    return output_path
+
+
 def main():
     args = parse_args()
+
+    if args.list_stored or args.convert_to_pdf:
+        store = EmailStore(DATABASE_PATH)
+        try:
+            if args.list_stored:
+                list_stored_emails(store)
+            else:
+                failed = False
+                for message_id in args.convert_to_pdf:
+                    try:
+                        output_path = convert_email_to_pdf(store, message_id)
+                        print(f"Created {output_path}")
+                    except Exception as error:
+                        failed = True
+                        print(f"Failed to convert {message_id}: {error}")
+                if failed:
+                    raise SystemExit(1)
+        finally:
+            store.close()
+        return
+
     client_id, authority, scopes = load_config()
     access_token = acquire_access_token(client_id, authority, scopes)
     graph = GraphClient(access_token)

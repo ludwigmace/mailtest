@@ -49,6 +49,7 @@ class EmailStore:
                 processing_status TEXT NOT NULL DEFAULT 'pending',
                 downloaded_at TEXT NOT NULL,
                 processed_at TEXT,
+                pdf_path TEXT,
                 last_error TEXT,
                 raw_message_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -64,6 +65,7 @@ class EmailStore:
                 is_inline INTEGER NOT NULL DEFAULT 0,
                 content_id TEXT,
                 attachment_type TEXT,
+                attachment_index INTEGER NOT NULL DEFAULT 0,
                 local_path TEXT,
                 sha256 TEXT,
                 download_status TEXT NOT NULL DEFAULT 'pending',
@@ -79,6 +81,21 @@ class EmailStore:
                 ON attachments(graph_id);
             """
         )
+        email_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(emails)")
+        }
+        if "pdf_path" not in email_columns:
+            self.connection.execute("ALTER TABLE emails ADD COLUMN pdf_path TEXT")
+        attachment_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(attachments)")
+        }
+        if "attachment_index" not in attachment_columns:
+            self.connection.execute(
+                "ALTER TABLE attachments ADD COLUMN attachment_index "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
         self.connection.commit()
 
     def upsert_email(self, message):
@@ -143,6 +160,20 @@ class EmailStore:
                     processing_status = 'pending',
                     downloaded_at = excluded.downloaded_at,
                     processed_at = NULL,
+                    pdf_path = CASE
+                        WHEN emails.subject IS NOT excluded.subject
+                          OR emails.sender_json IS NOT excluded.sender_json
+                          OR emails.to_recipients_json IS NOT excluded.to_recipients_json
+                          OR emails.cc_recipients_json IS NOT excluded.cc_recipients_json
+                          OR emails.bcc_recipients_json IS NOT excluded.bcc_recipients_json
+                          OR emails.reply_to_json IS NOT excluded.reply_to_json
+                          OR emails.body_content_type IS NOT excluded.body_content_type
+                          OR emails.body_content IS NOT excluded.body_content
+                          OR emails.received_datetime IS NOT excluded.received_datetime
+                          OR emails.sent_datetime IS NOT excluded.sent_datetime
+                        THEN NULL
+                        ELSE emails.pdf_path
+                    END,
                     last_error = NULL,
                     raw_message_json = excluded.raw_message_json,
                     updated_at = excluded.updated_at
@@ -157,34 +188,52 @@ class EmailStore:
         ).fetchone()
         return dict(row) if row else None
 
-    def upsert_attachment(self, graph_id, attachment, attachment_type):
+    def upsert_attachment(
+        self, graph_id, attachment, attachment_type, attachment_index=0
+    ):
         attachment_id = attachment.get("id")
         if not attachment_id:
             raise ValueError("Graph attachment is missing its id")
+        metadata = (
+            attachment.get("name") or "attachment",
+            attachment.get("contentType"),
+            attachment.get("size"),
+            int(bool(attachment.get("isInline"))),
+            attachment.get("contentId"),
+            attachment_type,
+            attachment_index,
+        )
         with self.connection:
+            existing = self.connection.execute(
+                """SELECT name, content_type, size, is_inline, content_id,
+                          attachment_type, attachment_index
+                   FROM attachments WHERE graph_id = ? AND attachment_id = ?""",
+                (graph_id, attachment_id),
+            ).fetchone()
+            if not existing or tuple(existing) != metadata:
+                self.connection.execute(
+                    "UPDATE emails SET pdf_path = NULL WHERE graph_id = ?",
+                    (graph_id,),
+                )
             self.connection.execute(
                 """
                 INSERT INTO attachments (
                     graph_id, attachment_id, name, content_type, size,
-                    is_inline, content_id, attachment_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    is_inline, content_id, attachment_type, attachment_index
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(graph_id, attachment_id) DO UPDATE SET
                     name = excluded.name,
                     content_type = excluded.content_type,
                     size = excluded.size,
                     is_inline = excluded.is_inline,
                     content_id = excluded.content_id,
-                    attachment_type = excluded.attachment_type
+                    attachment_type = excluded.attachment_type,
+                    attachment_index = excluded.attachment_index
                 """,
                 (
                     graph_id,
                     attachment_id,
-                    attachment.get("name") or "attachment",
-                    attachment.get("contentType"),
-                    attachment.get("size"),
-                    int(bool(attachment.get("isInline"))),
-                    attachment.get("contentId"),
-                    attachment_type,
+                    *metadata,
                 ),
             )
 
@@ -232,11 +281,30 @@ class EmailStore:
         email["attachments"] = [
             dict(attachment)
             for attachment in self.connection.execute(
-                "SELECT * FROM attachments WHERE graph_id = ? ORDER BY name",
+                "SELECT * FROM attachments WHERE graph_id = ? "
+                "ORDER BY attachment_index, name",
                 (graph_id,),
             )
         ]
         return email
+
+    def list_recent_emails(self, limit=20):
+        rows = self.connection.execute(
+            """
+            SELECT graph_id, subject, sender_json, received_datetime,
+                   processing_status, pdf_path
+            FROM emails
+            ORDER BY received_datetime DESC, downloaded_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        emails = []
+        for row in rows:
+            email = dict(row)
+            email["sender"] = json.loads(email.pop("sender_json"))
+            emails.append(email)
+        return emails
 
     def set_processing_status(self, graph_id, status, flag_status=None, error=None):
         processed_at = _utc_now() if status == "processed" else None
@@ -250,6 +318,13 @@ class EmailStore:
                 WHERE graph_id = ?
                 """,
                 (status, flag_status, processed_at, error, _utc_now(), graph_id),
+            )
+
+    def set_pdf_path(self, graph_id, pdf_path):
+        with self.connection:
+            self.connection.execute(
+                "UPDATE emails SET pdf_path = ?, updated_at = ? WHERE graph_id = ?",
+                (str(pdf_path), _utc_now(), graph_id),
             )
 
     def close(self):

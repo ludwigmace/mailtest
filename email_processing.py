@@ -2,6 +2,6 @@
 
 
 def process_email(email):
-    """Receive a stored email and its attachment references, then choose a flag."""
-    # The email dict includes decoded recipient fields, body content and attachments.
+    """Process stored email data; PDF generation is a separate CLI action."""
+    # Replace this stub with downstream processing of the message or attachments.
     return "complete"
