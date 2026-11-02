@@ -292,7 +292,9 @@ class EmailStore:
         rows = self.connection.execute(
             """
             SELECT graph_id, subject, sender_json, received_datetime,
-                   processing_status, pdf_path
+                   processing_status, flag_status, pdf_path,
+                   (SELECT COUNT(*) FROM attachments
+                    WHERE attachments.graph_id = emails.graph_id) AS attachment_count
             FROM emails
             ORDER BY received_datetime DESC, downloaded_at DESC
             LIMIT ?
@@ -305,6 +307,16 @@ class EmailStore:
             email["sender"] = json.loads(email.pop("sender_json"))
             emails.append(email)
         return emails
+
+    def delete_email(self, graph_id):
+        email = self.get_email(graph_id)
+        if email is None:
+            return None
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM emails WHERE graph_id = ?", (graph_id,)
+            )
+        return email
 
     def set_processing_status(self, graph_id, status, flag_status=None, error=None):
         processed_at = _utc_now() if status == "processed" else None

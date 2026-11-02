@@ -79,6 +79,7 @@ Graph attachment ID.
 Other commands:
 
 ```powershell
+python pull_emails.py --tui
 python pull_emails.py --list
 python pull_emails.py --list-stored
 python pull_emails.py --convert-to-pdf "<GRAPH_MESSAGE_ID>"
@@ -93,6 +94,24 @@ prints recent Exchange message IDs for use with `--message-id`. After syncing,
 use `--list-stored` to find local message IDs, then pass one or more of them to
 `--convert-to-pdf`. Listing and conversion use the local database and do not
 require Microsoft Graph authentication.
+
+### Terminal UI
+
+Run `python pull_emails.py --tui` to browse synced messages. Select a row with
+the arrow keys to view sender, recipients, dates, status, attachment names, a
+body preview, and PDF availability. Use:
+
+- **P** — generate or regenerate the selected email PDF.
+- **D** — confirm and delete the local database entry, downloaded attachments,
+  and generated PDF. This does not delete the message from Exchange.
+- **S** — authenticate if needed, pull currently `notFlagged` messages from
+  Exchange, download their attachments, and refresh the list when sync finishes.
+- **R** — refresh the list.
+- **Q** — quit.
+
+Browsing, PDF conversion, and deletion use the local database without Graph
+authentication. Pressing **S** uses the same Graph sign-in as
+`python pull_emails.py`; a browser may open if interactive sign-in is needed.
 
 ## Development notes for future changes
 

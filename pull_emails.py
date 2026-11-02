@@ -42,6 +42,11 @@ def parse_args():
         help="List recently synced emails available for PDF conversion",
     )
     parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Open the local email browser and PDF manager",
+    )
+    parser.add_argument(
         "--convert-to-pdf",
         nargs="+",
         metavar="GRAPH_MESSAGE_ID",
@@ -65,14 +70,15 @@ def parse_args():
         for value in (
             args.list,
             args.list_stored,
+            args.tui,
             args.convert_to_pdf,
             args.message_id,
         )
     )
     if selected_modes > 1:
         parser.error(
-            "--list, --list-stored, --convert-to-pdf, and --message-id "
-            "are mutually exclusive"
+            "--list, --list-stored, --tui, --convert-to-pdf, and "
+            "--message-id are mutually exclusive"
         )
     return args
 
@@ -96,7 +102,7 @@ def load_config():
     return client_id, config["authority"], scopes
 
 
-def acquire_access_token(client_id, authority, scopes):
+def acquire_access_token(client_id, authority, scopes, log=print):
     from msal import PublicClientApplication
     from msal_extensions import FilePersistenceWithDataProtection, PersistedTokenCache
 
@@ -114,7 +120,7 @@ def acquire_access_token(client_id, authority, scopes):
     if accounts:
         result = app.acquire_token_silent(scopes, account=accounts[0])
     if not result:
-        print("Opening browser for authentication...")
+        log("Opening browser for authentication...")
         result = app.acquire_token_interactive(scopes=scopes)
     if "access_token" not in result:
         raise RuntimeError(
@@ -189,14 +195,14 @@ def _download_attachment(
             response.close()
 
 
-def sync_emails(graph, store):
+def sync_emails(graph, store, log=print):
     succeeded = 0
     failed = 0
 
     for message in graph.list_not_flagged_messages():
         message_id = message.get("id")
         if not message_id:
-            print("Skipping a Graph message without an ID")
+            log("Skipping a Graph message without an ID")
             failed += 1
             continue
 
@@ -236,13 +242,14 @@ def sync_emails(graph, store):
                 message_id, "processed", flag_status=flag_status
             )
             succeeded += 1
-            print(f"Processed {message_id}: flag set to {flag_status}")
+            log(f"Processed {message_id}: flag set to {flag_status}")
         except Exception as error:
             store.set_processing_status(message_id, stage, error=str(error))
             failed += 1
-            print(f"Failed to process {message_id}: {error}")
+            log(f"Failed to process {message_id}: {error}")
 
-    print(f"\nSync finished: {succeeded} processed, {failed} failed.")
+    log(f"Sync finished: {succeeded} processed, {failed} failed.")
+    return succeeded, failed
 
 
 def list_recent_emails(graph):
@@ -292,13 +299,52 @@ def convert_email_to_pdf(store, message_id):
     return output_path
 
 
+def delete_email_locally(store, message_id):
+    email = store.delete_email(message_id)
+    if email is None:
+        raise ValueError(f"Email {message_id!r} is not stored locally")
+
+    artifacts = [
+        (attachment.get("local_path"), ATTACHMENT_ROOT)
+        for attachment in email.get("attachments", [])
+    ]
+    artifacts.append((email.get("pdf_path"), PDF_ROOT))
+    cleanup_errors = []
+    for artifact, allowed_root in artifacts:
+        if not artifact:
+            continue
+        path = Path(artifact).absolute()
+        root = Path(allowed_root).resolve()
+        try:
+            path.relative_to(root)
+            if path.is_symlink():
+                path.unlink()
+            else:
+                path.resolve(strict=True).relative_to(root)
+                path.unlink()
+            if allowed_root == ATTACHMENT_ROOT:
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as error:
+            cleanup_errors.append(f"{artifact}: {error}")
+    return cleanup_errors
+
+
 def main():
     args = parse_args()
 
-    if args.list_stored or args.convert_to_pdf:
+    if args.list_stored or args.tui or args.convert_to_pdf:
         store = EmailStore(DATABASE_PATH)
         try:
-            if args.list_stored:
+            if args.tui:
+                from email_tui import EmailTui
+
+                EmailTui(store).run()
+            elif args.list_stored:
                 list_stored_emails(store)
             else:
                 failed = False
