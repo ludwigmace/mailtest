@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "outlook-email-puller"
+version = "0.1.0"
+description = "Pull Exchange Online email, manage local PDFs, and browse them in a TUI."
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.scripts]
+emails = "emails_command:main"
+
+[tool.setuptools]
+py-modules = [
+    "emails_command",
+    "email_processing",
+    "email_store",
+    "email_to_pdf",
+    "email_tui",
+    "graph_client",
+    "pull_emails",
+]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }

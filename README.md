@@ -54,6 +54,17 @@ Graph attachment ID.
    pip install -r requirements.txt
    ```
 
+   Install the project itself in editable mode to get the `emails` command:
+
+   ```powershell
+   pip install -e .
+   ```
+
+   This creates `emails.exe` in your Python scripts directory, which is already
+   on `PATH`. Typing `emails` opens the TUI from any directory, while arguments
+   pass through to `pull_emails.py` (for example, `emails --list-stored`).
+   Re-run `pip install -e .` if you move the project folder.
+
    Microsoft Office documents (`.docx`, `.xlsx`, `.pptx`, `.rtf`, and compatible
    formats) require LibreOffice installed with `soffice` on `PATH`. PDFs are
    appended as-is; text, HTML, `.eml`, and common image formats are converted
@@ -79,6 +90,7 @@ Graph attachment ID.
 Other commands:
 
 ```powershell
+emails
 python pull_emails.py --tui
 python pull_emails.py --list
 python pull_emails.py --list-stored
@@ -97,9 +109,9 @@ require Microsoft Graph authentication.
 
 ### Terminal UI
 
-Run `python pull_emails.py --tui` to browse synced messages. Select a row with
-the arrow keys to view sender, recipients, dates, status, attachment names, a
-body preview, and PDF availability. Use:
+Run `emails` (or `python pull_emails.py --tui`) to browse synced messages.
+Select a row with the arrow keys to view sender, recipients, dates, status,
+attachment names, a body preview, and PDF availability. Use:
 
 - **P** — generate or regenerate the selected email PDF.
 - **D** — confirm and delete the local database entry, downloaded attachments,
